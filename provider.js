@@ -2,277 +2,455 @@
 /// <reference path="./core.d.ts" />
 
 class Provider {
-
-    // ==========================================
-    // CONFIGURATION
-    // ==========================================
-    private readonly baseUrl = "https://tenshitv.com";
+    // Configuration avec valeurs par défaut
+    private baseUrl = "{{baseUrl}}" || "https://tenshitv.com";
+    private useChromeDP = {{useChromeDP}} === "true";
     
-    // Headers pour simuler un vrai navigateur et éviter le blocage Cloudflare/Anti-Bot
-    private readonly headers = {
+    // Headers pour les requêtes
+    private headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Referer": this.baseUrl,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1"
     };
 
-    // ==========================================
-    // SETTINGS
-    // ==========================================
-    getSettings(): Settings {
+    getSettings() {
         return {
-            // Si TenshiTV propose plusieurs serveurs (Lulu, VidCloud, etc.), ajoute leurs noms ici.
-            // Sinon, reste sur "default"
-            episodeServers: ["default"], 
-            supportsDub: true // Met false si le site n'a pas de VF
+            episodeServers: ["default", "tenshi", "streamtape", "vidcloud"],
+            supportsDub: false
         };
     }
 
-    // ==========================================
-    // METHODES UTILITAIRES (HELPERS)
-    // ==========================================
-
-    /**
-     * Convertit une URL relative en URL absolue si besoin
-     */
-    private resolveUrl(url: string | undefined): string {
+    // ==================== MÉTHODES UTILITAIRES ====================
+    
+    private resolveUrl(url) {
         if (!url) return "";
         if (url.startsWith("http")) return url;
-        if (url.startsWith("//")) return "https:" + url;
-        return this.baseUrl + (url.startsWith("/") ? "" : "/") + url;
+        if (url.startsWith("//")) return `https:${url}`;
+        if (url.startsWith("/")) return `${this.baseUrl}${url}`;
+        return `${this.baseUrl}/${url}`;
     }
 
-    /**
-     * Nettoie une chaîne et extrait le premier nombre entier (pour les épisodes)
-     * Ex: "Episode 5 VF" -> 5
-     */
-    private extractEpisodeNumber(text: string): number {
-        if (!text) return -1;
-        const match = text.match(/\d+/);
-        return match ? parseInt(match[0]) : -1;
+    private extractEpisodeNumber(text) {
+        // Extrait le numéro d'épisode de différents formats
+        const patterns = [
+            /Episode\s*(\d+)/i,
+            /Ep\.?\s*(\d+)/i,
+            /Eps?\.?\s*(\d+)/i,
+            /(\d+)\s*(?:VOSTFR|VF|SUB|DUB)/i,
+            /#(\d+)/,
+            /^(\d+)$/
+        ];
+        
+        for (const pattern of patterns) {
+            const match = text.match(pattern);
+            if (match && match[1]) {
+                return parseInt(match[1], 10);
+            }
+        }
+        
+        // Fallback: extraire le premier nombre trouvé
+        const numberMatch = text.match(/(\d+)/);
+        return numberMatch ? parseInt(numberMatch[1], 10) : 0;
     }
 
-    // ==========================================
-    // 1. RECHERCHE (SEARCH)
-    // ==========================================
-    async search(opts: SearchOptions): Promise<SearchResult[]> {
-        console.log(`[TenshiTV Ultimate] Recherche : "${opts.query}"`);
+    private async fetchWithRetry(url, options = {}, retries = 3) {
+        for (let i = 0; i < retries; i++) {
+            try {
+                const response = await fetch(url, {
+                    ...options,
+                    headers: { ...this.headers, ...options.headers }
+                });
+                
+                if (response.ok) return response;
+                
+                if (response.status === 429) { // Too Many Requests
+                    await $sleep(2000 * (i + 1)); // Wait longer each retry
+                    continue;
+                }
+                
+                if (response.status >= 500) {
+                    await $sleep(1000 * (i + 1));
+                    continue;
+                }
+                
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                
+            } catch (error) {
+                if (i === retries - 1) throw error;
+                await $sleep(1000 * (i + 1));
+            }
+        }
+    }
 
+    // ==================== RECHERCHE ====================
+    
+    async search(opts) {
+        console.log(`[TenshiTV] Searching for: "${opts.query}"`);
+        
         try {
-            // Construction de l'URL de recherche
-            const searchQuery = encodeURIComponent(opts.query);
-            const searchUrl = `${this.baseUrl}/search?q=${searchQuery}`; 
-            // NOTE: Si ça échoue, essaye "/search?keyword=" ou "/?s="
-
-            const res = await fetch(searchUrl, { headers: this.headers });
-
-            if (!res.ok) {
-                console.warn(`[TenshiTV] Erreur HTTP ${res.status} lors de la recherche.`);
+            // Essayer différentes URL de recherche
+            const searchUrls = [
+                `${this.baseUrl}/search?q=${encodeURIComponent(opts.query)}`,
+                `${this.baseUrl}/search.html?keyword=${encodeURIComponent(opts.query)}`,
+                `${this.baseUrl}/?s=${encodeURIComponent(opts.query)}`,
+                `${this.baseUrl}/anime?search=${encodeURIComponent(opts.query)}`
+            ];
+            
+            let html = "";
+            let successfulUrl = "";
+            
+            // Essayer chaque URL jusqu'à ce qu'une fonctionne
+            for (const url of searchUrls) {
+                try {
+                    const response = await this.fetchWithRetry(url);
+                    if (response.ok) {
+                        html = await response.text();
+                        successfulUrl = url;
+                        break;
+                    }
+                } catch (error) {
+                    console.log(`[TenshiTV] Search URL failed: ${url}`);
+                }
+            }
+            
+            if (!html) {
+                console.error("[TenshiTV] All search URLs failed");
                 return [];
             }
-
-            const html = await res.text();
+            
             const $ = LoadDoc(html);
-            const results: SearchResult[] = [];
-
-            // SÉLECTEUR INTELLIGENT :
-            // On cherche les conteneurs qui ressemblent à des cartes d'anime.
-            // On cible généralement les balises <a> contenant une image ou un titre, dans une div.
+            const results = [];
+            
+            // Sélecteurs communs pour les résultats de recherche
             const selectors = [
-                "div.card a",           // Bootstrap style
-                "div.item a",           // Generic list
-                "article a",            // Semantic HTML
-                "li a",                 // List items
-                "a[href*='/anime/']"    // Direct links to anime pages
+                ".video-item a", 
+                ".anime-item a", 
+                ".list-video .item a",
+                ".film-list a",
+                ".items a",
+                "article a",
+                ".post a",
+                "a[href*='/anime/']",
+                "a[href*='/videos/']"
             ];
-
-            selectors.forEach(selector => {
-                if (results.length >= 10) return; // Limite atteinte
-
-                $(selector).each((_, el) => {
-                    if (results.length >= 10) return false;
-
-                    const $el = $(el);
+            
+            for (const selector of selectors) {
+                $(selector).each((_, element) => {
+                    const $el = $(element);
                     const href = $el.attr("href");
-                    const title = $el.attr("title") || $el.text().trim();
+                    let title = $el.attr("title") || $el.text().trim();
                     
-                    // Filtre basique : on ignore les liens vides ou les liens "contact", "login", etc.
-                    if (href && title && title.length > 2 && !href.includes("login") && !href.includes("register")) {
+                    // Nettoyer le titre
+                    title = title.replace(/\s*-\s*TenshiTV\s*$/i, "")
+                                 .replace(/\s*VOSTFR\s*$/i, "")
+                                 .replace(/\s*VF\s*$/i, "")
+                                 .trim();
+                    
+                    if (href && title && title.length > 0) {
                         const fullUrl = this.resolveUrl(href);
+                        const existing = results.find(r => r.url === fullUrl);
                         
-                        // Vérification doublon
-                        if (!results.find(r => r.id === fullUrl)) {
+                        if (!existing) {
                             results.push({
                                 id: fullUrl,
                                 title: title,
                                 url: fullUrl,
-                                subOrDub: "both"
+                                subOrDub: "sub"
                             });
                         }
                     }
                 });
-            });
-
-            console.log(`[TenshiTV] ${results.length} animes trouvés.`);
-            return results;
-
+                
+                if (results.length > 0) break; // Arrêter au premier sélecteur qui fonctionne
+            }
+            
+            console.log(`[TenshiTV] Found ${results.length} results`);
+            return results.slice(0, 20); // Limiter à 20 résultats
+            
         } catch (error) {
-            console.error("[TenshiTV] Erreur critique dans search():", error);
+            console.error("[TenshiTV] Search error:", error);
             return [];
         }
     }
 
-    // ==========================================
-    // 2. LISTE DES ÉPISODES (FIND EPISODES)
-    // ==========================================
-    async findEpisodes(id: string): Promise<EpisodeDetails[]> {
-        console.log(`[TenshiTV] Récupération épisodes pour ID : ${id}`);
-
+    // ==================== LISTE DES ÉPISODES ====================
+    
+    async findEpisodes(id) {
+        console.log(`[TenshiTV] Finding episodes for: ${id}`);
+        
         try {
-            const res = await fetch(id, { headers: this.headers });
-            const html = await res.text();
+            let html = "";
+            
+            if (this.useChromeDP) {
+                // Utiliser ChromeDP pour les sites avec JavaScript
+                const browser = await ChromeDP.newBrowser();
+                await browser.navigate(id);
+                await $sleep(3000); // Attendre le chargement JS
+                html = await browser.html();
+                await browser.close();
+            } else {
+                const response = await this.fetchWithRetry(id);
+                html = await response.text();
+            }
+            
             const $ = LoadDoc(html);
-            const episodes: EpisodeDetails[] = [];
-
-            // SÉLECTEURS POUR LES ÉPISODES
-            // On cherche généralement une liste de liens
-            const episodeSelectors = [
-                "div.episodes a",      // Classe standard
-                "div.ep-list a",       // Variante
-                "li.episode a",        // Liste <li>
-                "a[href*='ep']"        // Tout lien contenant 'ep' dans l'URL
+            const episodes = [];
+            
+            // Chercher la liste des épisodes
+            const episodeContainers = [
+                "#episode-list",
+                ".episode-list",
+                ".list-episodes",
+                ".episodes",
+                "#episodes",
+                ".eps"
             ];
-
-            episodeSelectors.forEach(selector => {
-                // Si on a déjà trouvé des épisodes avec un sélecteur précédent, on s'arrête
-                if (episodes.length > 0) return;
-
-                $(selector).each((i, el) => {
-                    const $el = $(el);
-                    const href = $el.attr("href");
-                    const text = $el.text().trim();
-
-                    if (href) {
-                        const fullUrl = this.resolveUrl(href);
-                        
-                        // Extraction intelligente du numéro
-                        // Si le texte est "Ep 5", on prend 5. Si c'est juste le lien, on utilise l'index.
-                        let num = this.extractEpisodeNumber(text);
-                        if (num === -1) num = i + 1;
-
-                        // On évite les doublons d'URL
-                        if (!episodes.find(e => e.url === fullUrl)) {
-                            episodes.push({
-                                id: fullUrl,
-                                number: num,
-                                url: fullUrl,
-                                title: text || `Episode ${num}`
-                            });
+            
+            let episodeContainer = null;
+            for (const selector of episodeContainers) {
+                episodeContainer = $(selector);
+                if (episodeContainer.length > 0) break;
+            }
+            
+            if (!episodeContainer || episodeContainer.length === 0) {
+                // Essayer de trouver des épisodes directement dans la page
+                episodeContainer = $("body");
+            }
+            
+            // Sélecteurs pour les liens d'épisodes
+            episodeContainer.find("a").each((_, element) => {
+                const $el = $(element);
+                const href = $el.attr("href");
+                const text = $el.text().trim();
+                
+                if (!href || !text) return;
+                
+                // Vérifier si c'est un lien d'épisode
+                const isEpisode = href.match(/(episode|ep|eps?|video|watch|voir|stream)/i) ||
+                                 text.match(/(episode|ep|eps?|#)/i) ||
+                                 href.match(/\/\d+$/);
+                
+                if (isEpisode) {
+                    const fullUrl = this.resolveUrl(href);
+                    const epNumber = this.extractEpisodeNumber(text);
+                    
+                    if (epNumber > 0) {
+                        episodes.push({
+                            id: `${id}|${epNumber}|${fullUrl}`,
+                            number: epNumber,
+                            url: fullUrl,
+                            title: `Episode ${epNumber}`
+                        });
+                    }
+                }
+            });
+            
+            // Si pas d'épisodes trouvés, chercher dans les données structurées
+            if (episodes.length === 0) {
+                const scriptTags = $("script[type='application/ld+json']");
+                scriptTags.each((_, script) => {
+                    try {
+                        const data = JSON.parse($(script).html());
+                        if (data.episode) {
+                            const epNumber = this.extractEpisodeNumber(data.episode.name || "");
+                            if (epNumber > 0) {
+                                episodes.push({
+                                    id: `${id}|${epNumber}|${data.url}`,
+                                    number: epNumber,
+                                    url: this.resolveUrl(data.url),
+                                    title: data.episode.name || `Episode ${epNumber}`
+                                });
+                            }
                         }
+                    } catch (e) {
+                        // Ignorer les erreurs de parsing JSON
                     }
                 });
-            });
-
-            // Tri par numéro d'épisode (très important pour Seanime)
-            episodes.sort((a, b) => a.number - b.number);
-
-            console.log(`[TenshiTV] ${episodes.length} épisodes chargés et triés.`);
-            return episodes;
-
+            }
+            
+            // Supprimer les doublons et trier
+            const uniqueEpisodes = [];
+            const seen = new Set();
+            
+            for (const ep of episodes) {
+                if (!seen.has(ep.number)) {
+                    seen.add(ep.number);
+                    uniqueEpisodes.push(ep);
+                }
+            }
+            
+            uniqueEpisodes.sort((a, b) => a.number - b.number);
+            
+            console.log(`[TenshiTV] Found ${uniqueEpisodes.length} episodes`);
+            return uniqueEpisodes;
+            
         } catch (error) {
-            console.error("[TenshiTV] Erreur dans findEpisodes():", error);
+            console.error("[TenshiTV] Find episodes error:", error);
             return [];
         }
     }
 
-    // ==========================================
-    // 3. RÉCUPÉRATION DE LA VIDÉO (FIND SERVER)
-    // ==========================================
-    async findEpisodeServer(episode: EpisodeDetails, _server: string): Promise<EpisodeServer> {
-        console.log(`[TenshiTV] Récupération stream pour : ${episode.number}`);
-
+    // ==================== LECTEUR VIDÉO ====================
+    
+    async findEpisodeServer(episode, server) {
+        console.log(`[TenshiTV] Finding video for episode: ${episode.url}`);
+        
         try {
-            const res = await fetch(episode.url, { headers: this.headers });
-            const html = await res.text();
-            const $ = LoadDoc(html);
-
-            let videoUrl = "";
-            let videoType: "mp4" | "m3u8" | "unknown" = "unknown";
-
-            // === STRATÉGIE 1 : Extraction M3U8 directe (RegEx) ===
-            // Beaucoup de sites cachent le lien .m3u8 directement dans le JS ou le HTML source
-            const m3u8Regex = /"(https?:\/\/.*?\.m3u8.*?)"|'(https?:\/\/.*?\.m3u8.*?)'/g;
-            let match;
-            while ((match = m3u8Regex.exec(html)) !== null) {
-                // match[1] est entre guillemets doubles, match[2] entre simples
-                const potentialUrl = match[1] || match[2];
-                if (potentialUrl) {
-                    videoUrl = potentialUrl;
-                    videoType = "m3u8";
-                    break; // On prend le premier trouvé
+            let html = "";
+            
+            if (this.useChromeDP) {
+                const browser = await ChromeDP.newBrowser();
+                await browser.navigate(episode.url);
+                await $sleep(4000); // Attendre le chargement du lecteur
+                html = await browser.html();
+                await browser.close();
+            } else {
+                const response = await this.fetchWithRetry(episode.url);
+                html = await response.text();
+            }
+            
+            const videoSources = [];
+            let subtitles = [];
+            
+            // === STRATÉGIE 1: Extraire les sources vidéo ===
+            
+            // 1A. Rechercher des iframes (embed)
+            const iframeRegex = /<iframe[^>]*src=["']([^"']+)["'][^>]*>/gi;
+            let iframeMatch;
+            while ((iframeMatch = iframeRegex.exec(html)) !== null) {
+                const iframeUrl = this.resolveUrl(iframeMatch[1]);
+                if (iframeUrl.includes("stream") || iframeUrl.includes("video") || iframeUrl.includes("embed")) {
+                    videoSources.push({
+                        url: iframeUrl,
+                        type: "iframe",
+                        quality: "default",
+                        label: "Embed"
+                    });
                 }
             }
-
-            if (videoUrl) {
-                console.log("[TenshiTV] Lien M3U8 extrait via Regex.");
-            } 
-            // === STRATÉGIE 2 : Iframe (Embed) ===
-            else {
-                // On cherche un iframe. Souvent c'est un lecteur tiers (VidCloud, Lulu, etc.)
-                const iframe = $("iframe").first();
-                if (iframe.length) {
-                    videoUrl = iframe.attr("src") || "";
-                    console.log("[TenshiTV] Iframe détecté :", videoUrl);
-                    videoType = "unknown"; // Seanime essayera de le lire
-                } 
-                // === STRATÉGIE 3 : Balise Vidéo HTML5 ===
-                else {
-                    const videoTag = $("video").first();
-                    if (videoTag.length) {
-                        videoUrl = videoTag.attr("src") || "";
-                        // Parfois les sources sont dans des balises <source> enfants
-                        if (!videoUrl) {
-                            const source = videoTag.find("source").first();
-                            videoUrl = source.attr("src") || "";
-                        }
-                        videoType = "mp4";
-                        console.log("[TenshiTV] Vidéo MP4 directe détectée.");
+            
+            // 1B. Rechercher des sources vidéo directes (m3u8, mp4)
+            const videoRegexes = [
+                /["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/gi,
+                /["'](https?:\/\/[^"']+\.mp4[^"']*)["']/gi,
+                /source\s+src=["']([^"']+)["']/gi,
+                /file:\s*["']([^"']+)["']/gi,
+                /sources:\s*\[[^\]]*["']([^"']+)["']/gi
+            ];
+            
+            for (const regex of videoRegexes) {
+                let match;
+                while ((match = regex.exec(html)) !== null) {
+                    const videoUrl = this.resolveUrl(match[1]);
+                    if (videoUrl.includes("m3u8") || videoUrl.includes("mp4")) {
+                        const quality = videoUrl.match(/(\d{3,4})[pP]/)?.[1] || "720";
+                        videoSources.push({
+                            url: videoUrl,
+                            type: videoUrl.includes("m3u8") ? "m3u8" : "mp4",
+                            quality: `${quality}p`,
+                            label: `${quality}p`
+                        });
                     }
                 }
             }
-
-            if (!videoUrl) {
-                throw new Error("Aucun flux vidéo trouvé (M3U8, Iframe ou MP4).");
+            
+            // 1C. Analyser les balises video HTML5
+            const $ = LoadDoc(html);
+            $("video source").each((_, element) => {
+                const $el = $(element);
+                const src = $el.attr("src");
+                const type = $el.attr("type");
+                
+                if (src) {
+                    const videoUrl = this.resolveUrl(src);
+                    videoSources.push({
+                        url: videoUrl,
+                        type: videoUrl.includes("m3u8") ? "m3u8" : "mp4",
+                        quality: $el.attr("label") || "default",
+                        label: $el.attr("title") || $el.attr("label") || "Default"
+                    });
+                }
+            });
+            
+            // === STRATÉGIE 2: Extraire les sous-titres ===
+            $("track").each((_, element) => {
+                const $el = $(element);
+                const src = $el.attr("src");
+                const lang = $el.attr("label") || $el.attr("srclang") || "fr";
+                
+                if (src) {
+                    subtitles.push({
+                        id: lang,
+                        url: this.resolveUrl(src),
+                        language: lang,
+                        isDefault: $el.attr("default") !== undefined
+                    });
+                }
+            });
+            
+            // Rechercher des sous-titres dans les scripts
+            const subRegex = /["'](https?:\/\/[^"']+\.(vtt|srt|ass)[^"']*)["']/gi;
+            let subMatch;
+            while ((subMatch = subRegex.exec(html)) !== null) {
+                subtitles.push({
+                    id: `sub-${subtitles.length}`,
+                    url: this.resolveUrl(subMatch[1]),
+                    language: "fr",
+                    isDefault: subtitles.length === 0
+                });
             }
-
-            // Assurer que l'URL est absolue
-            videoUrl = this.resolveUrl(videoUrl);
-
-            // === QUALITÉ (Extraction basique) ===
-            // On essaie de deviner la qualité via l'URL (ex: 1080p, 720)
-            let quality = "1080p"; // Défaut
-            if (videoUrl.includes("720")) quality = "720p";
-            else if (videoUrl.includes("480")) quality = "480p";
-            else if (videoUrl.includes("360")) quality = "360p";
-
-            // === RÉPONSE FINALE ===
+            
+            // === SI AUCUNE SOURCE N'EST TROUVÉE ===
+            if (videoSources.length === 0) {
+                // Essayer de trouver l'URL dans les paramètres JS
+                const jsRegex = /(?:url|src|file)\s*[=:]\s*["']([^"']+)["']/gi;
+                let jsMatch;
+                const potentialUrls = [];
+                
+                while ((jsMatch = jsRegex.exec(html)) !== null) {
+                    potentialUrls.push(jsMatch[1]);
+                }
+                
+                for (const url of potentialUrls) {
+                    if (url.includes("video") || url.includes("stream") || url.includes("m3u8") || url.includes("mp4")) {
+                        videoSources.push({
+                            url: this.resolveUrl(url),
+                            type: "unknown",
+                            quality: "auto",
+                            label: "Auto-detected"
+                        });
+                        break;
+                    }
+                }
+            }
+            
+            // === PRÉPARER LA RÉPONSE FINALE ===
+            if (videoSources.length === 0) {
+                throw new Error("No video source found");
+            }
+            
             return {
-                server: _server || "default",
+                server: server || "default",
                 headers: {
-                    "Referer": episode.url, // Important : le referer doit être la page de l'épisode
-                    "User-Agent": this.headers["User-Agent"]
+                    "Referer": this.baseUrl,
+                    "User-Agent": this.headers["User-Agent"],
+                    "Origin": this.baseUrl
                 },
-                videoSources: [{
-                    url: videoUrl,
-                    type: videoType,
-                    quality: quality,
-                    label: "Default",
-                    subtitles: [] // Pourrait être implémenté en cherchant <track>
-                }]
+                videoSources: videoSources.map(source => ({
+                    ...source,
+                    subtitles: subtitles
+                }))
             };
-
+            
         } catch (error) {
-            console.error("[TenshiTV] Erreur critique dans findEpisodeServer():", error);
-            throw error;
+            console.error("[TenshiTV] Find episode server error:", error);
+            
+            // Fallback: retourner un message d'erreur utile
+            throw new Error(`Failed to get video: ${error.message}. Try enabling ChromeDP in settings if the site uses JavaScript.`);
         }
     }
 }
