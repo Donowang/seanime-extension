@@ -1,0 +1,13 @@
+{
+  "id": "tenshitv-online",
+  "name": "TenshiTV",
+  "description": "Streaming TenshiTV",
+  "manifestURI": "",
+  "version": "1.0.0",
+  "author": "Toi",
+  "type": "onlinestream-provider",
+  "language": "javascript",
+  "lang": "multi",
+  "payload": "", 
+  "payloadURI": "https://raw.githubusercontent.com/TON_PSEUDO/TON_REPO/main/provider.js"
+}
