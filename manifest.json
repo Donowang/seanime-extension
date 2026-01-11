@@ -1,13 +1,31 @@
 {
   "id": "tenshitv-provider",
   "name": "TenshiTV",
-  "description": "Extension pour TenshiTV",
-  "manifestURI": "",
+  "description": "Streaming provider for TenshiTV.com",
+  "manifestURI": "https://raw.githubusercontent.com/TON_USER/TON_REPO/main/manifest.json",
   "version": "1.0.0",
-  "author": "Toi",
+  "author": "TonNom",
   "type": "onlinestream-provider",
   "language": "javascript",
-  "lang": "fr",
+  "lang": "multi",
   "payload": "",
-  "payloadURI": "https://raw.githubusercontent.com/TON_PSEUDO/TON_REPO/main/provider.js"
+  "payloadURI": "https://raw.githubusercontent.com/TON_USER/TON_REPO/main/provider.js",
+  "userConfig": {
+    "requiresConfig": false,
+    "version": 1,
+    "fields": [
+      {
+        "name": "baseUrl",
+        "label": "Base URL",
+        "type": "text",
+        "default": "https://tenshitv.com"
+      },
+      {
+        "name": "useChromeDP",
+        "label": "Use ChromeDP (for JavaScript sites)",
+        "type": "switch",
+        "default": "false"
+      }
+    ]
+  }
 }
